@@ -1,0 +1,4 @@
+проверить работу gateio - очень долгие коннекты - обновления
+исправить ошики GATEIO:
+GATEIO-WS-1] Ошибка: sent 1011 (internal error) keepalive ping timeout; no close frame received. Повтор...
+[GATEIO-WS-1] Подключение: ADA_USDT, ARB_USDT, DOT_USDT, LINK_USDT, LTC_USDT, NEAR_USDT

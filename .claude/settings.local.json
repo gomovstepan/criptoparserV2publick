@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.bybit.com)",
+      "WebFetch(domain:www.binance.com)",
+      "WebFetch(domain:www.gate.io)",
+      "WebFetch(domain:www.bitget.com)",
+      "WebSearch",
+      "WebFetch(domain:withdrawalfees.com)",
+      "WebFetch(domain:bybit-exchange.github.io)",
+      "WebFetch(domain:developers.binance.com)",
+      "WebFetch(domain:www.kucoin.com)",
+      "WebFetch(domain:docs.coinex.com)",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:gov.capital)",
+      "WebFetch(domain:github.com)",
+      "Skill(anthropic-skills:criptoparser-audit)",
+      "Skill(anthropic-skills:criptoparser-audit:*)",
+      "Bash(python -m pytest tests/ -x --tb=short -q)",
+      "Bash(py -m pytest tests/ -x --tb=short -q)"
+    ]
+  }
+}
