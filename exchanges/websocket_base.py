@@ -251,7 +251,7 @@ class WebSocketOrderBookConnection:
         """
         if update_type == "snapshot" or sequence is None or last_sequence is None:
             return True
-        return int(sequence) >= int(last_sequence)
+        return int(sequence) > int(last_sequence)
 
     # --- Abstract methods ---
 

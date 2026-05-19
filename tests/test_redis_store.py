@@ -84,7 +84,7 @@ class TestWriteOrderbook:
         await store.write_orderbook("binance", "BTCUSDT", "snapshot", [["100", "1"]], [["99", "2"]])
 
         mock_redis.pipeline.assert_called_once()
-        assert mock_redis.pipeline.call_args.kwargs.get("transaction") is True
+        assert mock_redis.pipeline.call_args.kwargs.get("transaction") is False
         mock_pipeline.execute.assert_awaited_once()
 
     @pytest.mark.asyncio

@@ -153,6 +153,8 @@ let rawPollTimer
 let arbitragePollTimer
 let durationTimer
 let settingsPollTimer
+let isFetchingRaw = false
+let isFetchingArbitrage = false
 const vladivostokFormatter = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Vladivostok',
   year: 'numeric',
@@ -301,15 +303,39 @@ const formatDurationFromStart = (startTime) => {
 }
 
 const fetchRaw = async () => {
-  const response = await fetch('/api/raw')
-  const payload = await response.json()
-  rawSnapshot.value = payload.data || {}
+  if (isFetchingRaw) return
+  isFetchingRaw = true
+  try {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 5000)
+    const response = await fetch('/api/raw', { signal: controller.signal })
+    clearTimeout(timeoutId)
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const payload = await response.json()
+    rawSnapshot.value = payload.data || {}
+  } catch (e) {
+    console.error('fetchRaw error:', e)
+  } finally {
+    isFetchingRaw = false
+  }
 }
 
 const fetchArbitrage = async () => {
-  const response = await fetch('/api/arbitrage')
-  const payload = await response.json()
-  arbitrage.value = payload.data || []
+  if (isFetchingArbitrage) return
+  isFetchingArbitrage = true
+  try {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 5000)
+    const response = await fetch('/api/arbitrage', { signal: controller.signal })
+    clearTimeout(timeoutId)
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const payload = await response.json()
+    arbitrage.value = payload.data || []
+  } catch (e) {
+    console.error('fetchArbitrage error:', e)
+  } finally {
+    isFetchingArbitrage = false
+  }
 }
 
 const fetchHistory = async () => {

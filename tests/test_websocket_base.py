@@ -203,9 +203,10 @@ class TestSequenceValidation:
         conn = FakeWsConnection(fake_settings, fake_store, 1, ["BTCUSDT"])
         assert conn.is_sequence_valid("BTCUSDT", "snapshot", 1, 100) is True
 
-    def test_equal_sequence_is_valid(self, fake_settings, fake_store):
+    def test_equal_sequence_is_invalid(self, fake_settings, fake_store):
+        """Равный sequence считается невалидным — предотвращает double-apply дублированных WS сообщений."""
         conn = FakeWsConnection(fake_settings, fake_store, 1, ["BTCUSDT"])
-        assert conn.is_sequence_valid("BTCUSDT", "delta", 5, 5) is True
+        assert conn.is_sequence_valid("BTCUSDT", "delta", 5, 5) is False
 
     def test_greater_sequence_is_valid(self, fake_settings, fake_store):
         conn = FakeWsConnection(fake_settings, fake_store, 1, ["BTCUSDT"])

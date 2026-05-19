@@ -58,7 +58,7 @@ class RedisOrderBookStore:
         ask_key = self.side_key(exchange_name, symbol, "ASK")
         bid_key = self.side_key(exchange_name, symbol, "BID")
         meta_key = self.meta_key(exchange_name, symbol)
-        pipeline = self.redis.pipeline(transaction=True)
+        pipeline = self.redis.pipeline(transaction=False)
 
         pipeline.sadd(self.symbols_key(exchange_name), normalize_symbol(symbol))
 
@@ -324,6 +324,9 @@ class RedisOrderBookStore:
                 "data": encoded_data,
             },
         )
+        # TTL = 60 секунд (2× event_expire_seconds по умолчанию)
+        ttl_seconds = max(60, int(self.redis_settings.get("event_ttl_seconds", 60)))
+        pipeline.expire(redis_key, ttl_seconds)
 
         results = await pipeline.execute()
         # hsetnx created_at возвращает 1 если поле создано, 0 если уже существовало

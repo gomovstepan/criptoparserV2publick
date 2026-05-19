@@ -214,11 +214,17 @@ class BackendService:
         """Загружает runtime-настройки из Redis/файла и применяет их."""
         if self.runtime_settings_store is not None:
             try:
-                self._runtime_settings = await self.runtime_settings_store.load()
+                new_settings = await self.runtime_settings_store.load()
+                settings_changed = new_settings != self._runtime_settings
+                self._runtime_settings = new_settings
+                if settings_changed:
+                    self._rebuild_fee_config_from_runtime()
+                    self._tier_threshold_cache = self._build_tier_threshold_cache()
             except Exception as e:
                 self.backend_logger.error("Failed to load runtime settings: %s", e)
-        self._rebuild_fee_config_from_runtime()
-        self._tier_threshold_cache = self._build_tier_threshold_cache()
+        else:
+            self._rebuild_fee_config_from_runtime()
+            self._tier_threshold_cache = self._build_tier_threshold_cache()
 
     def _runtime_value(self, key, default=None):
         """Возвращает значение runtime-настройки или default."""
@@ -245,32 +251,45 @@ class BackendService:
         while True:
             try:
                 await self._load_runtime_settings()
+
+                # --- ФАЗА 1: Чтение + быстрое обновление payload ---
                 raw_snapshot = await self.store.read_raw_snapshot(self.settings["exchanges"])
-                aggregated_snapshot = await self.store.read_aggregated_snapshot(
-                    exchanges=self.settings["exchanges"],
-                    target_value=self.settings["backend"]["target_value"],
-                    max_levels=self.settings["backend"]["max_levels"],
-                )
-                opportunities = self.find_arbitrage(aggregated_snapshot, raw_snapshot)
-                await self.sync_arbitrage_events(opportunities)
-                try:
-                    await self.process_arbitrage_events()
-                except Exception as e:
-                    self.arbitrage_logger.error("Arbitrage events processing failed: %s", e)
-                active_payload = await self.build_active_payload_from_redis()
+
+                # Быстрое обновление raw payload (фронт сразу видит свежие данные)
                 self.last_raw_payload = {
                     "type": "raw",
                     "timestamp": self.now_iso(),
                     "data": self.normalize_payload(raw_snapshot),
                 }
+
+                # Агрегируем в памяти из raw (НЕ читаем из Redis второй раз)
+                aggregated_snapshot = self._aggregate_in_memory(
+                    raw_snapshot,
+                    target_value=self.settings["backend"]["target_value"],
+                    max_levels=self.settings["backend"]["max_levels"],
+                )
+
+                # --- ФАЗА 2: Поиск арбитража ---
+                opportunities = self.find_arbitrage(aggregated_snapshot, raw_snapshot)
+                await self.sync_arbitrage_events(opportunities)
+
+                try:
+                    await self.process_arbitrage_events()
+                except Exception as e:
+                    self.arbitrage_logger.error("Arbitrage events processing failed: %s", e)
+
+                # --- ФАЗА 3: Финальное обновление arbitrage payload ---
+                active_payload = await self.build_active_payload_from_redis()
                 self.last_arbitrage_payload = {
                     "type": "arbitrage",
                     "timestamp": self.now_iso(),
                     "data": active_payload,
                 }
+
                 self.backend_logger.debug("Backend loop iteration completed.")
             except Exception as e:
                 self.backend_logger.error("Backend loop failed: %s", e)
+                # При ошибке — payload уже обновлён в фазе 1
 
             render_interval = float(
                 self._runtime_value(
@@ -279,6 +298,27 @@ class BackendService:
                 )
             )
             await asyncio.sleep(render_interval)
+
+    def _aggregate_in_memory(self, raw_snapshot, target_value, max_levels):
+        """Агрегирует raw стаканы в памяти вместо повторного чтения из Redis."""
+        result = {}
+        for exchange_name, symbols in raw_snapshot.items():
+            result[exchange_name] = {}
+            for symbol_name, sides in symbols.items():
+                ask_agg = self.store.aggregate_side(
+                    {Decimal(level["price"]): Decimal(level["volume"]) for level in sides.get("ASK", [])},
+                    "ASK", target_value, max_levels,
+                )
+                bid_agg = self.store.aggregate_side(
+                    {Decimal(level["price"]): Decimal(level["volume"]) for level in sides.get("BID", [])},
+                    "BID", target_value, max_levels,
+                )
+                if ask_agg or bid_agg:
+                    result[exchange_name][symbol_name] = {
+                        "ASK": ask_agg,
+                        "BID": bid_agg,
+                    }
+        return result
 
     async def start(self):
         """Запускает backend-цикл как фоновую задачу."""
@@ -434,7 +474,7 @@ class BackendService:
                             data["sell_exchange"],
                             event_confidence,
                         )
-                        await self.store.mark_arbitrage_event_sent(event_key)
+                        # НЕ помечаем sent=True — попробуем отправить позже если confidence вырастет
 
                 if (now - updated_at).total_seconds() > expire_seconds:
                     end_time_iso = now.isoformat()

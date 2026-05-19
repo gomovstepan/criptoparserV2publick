@@ -44,7 +44,8 @@ class HttpPollingOrderBookConnection:
                 continue
 
             elapsed = time.monotonic() - start
-            if elapsed > poll_interval:
+            sleep_time = poll_interval - elapsed
+            if sleep_time <= 0:
                 self.logger.warning(
                     "poll_once took %.2fs on connection_id=%s, exceeding poll_interval=%.2fs. "
                     "Consider reducing symbols per connection or increasing max_concurrent_requests.",
@@ -52,8 +53,9 @@ class HttpPollingOrderBookConnection:
                     self.connection_id,
                     poll_interval,
                 )
+                sleep_time = 0.01  # минимальная пауза
 
-            await asyncio.sleep(poll_interval)
+            await asyncio.sleep(sleep_time)
 
     async def poll_once(self):
         async def _fetch_and_write(symbol):
