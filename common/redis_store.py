@@ -301,6 +301,7 @@ class RedisOrderBookStore:
 
         decoded = self._decode_hash(raw_state)
         decoded["sent"] = decoded.get("sent", "0") == "1"
+        decoded["trade_signal_published"] = decoded.get("trade_signal_published", "0") == "1"
         try:
             decoded["data"] = json.loads(decoded.get("data", "{}"))
         except json.JSONDecodeError:
@@ -317,15 +318,20 @@ class RedisOrderBookStore:
         pipeline.sadd(self.arbitrage_events_set_key(), event_key)
         pipeline.hsetnx(redis_key, "created_at", now_iso)
         pipeline.hsetnx(redis_key, "sent", "0")
+        pipeline.hsetnx(redis_key, "telegram_message_id", "")
+        pipeline.hsetnx(redis_key, "cumulative_active_seconds", "0")
+        pipeline.hsetnx(redis_key, "last_active_at", now_iso)
+        pipeline.hsetnx(redis_key, "trade_signal_published", "0")
         pipeline.hset(
             redis_key,
             mapping={
                 "updated_at": now_iso,
                 "data": encoded_data,
+                "last_active_at": now_iso,  # всегда обновляем
             },
         )
-        # TTL = 60 секунд (2× event_expire_seconds по умолчанию)
-        ttl_seconds = max(60, int(self.redis_settings.get("event_ttl_seconds", 60)))
+        # TTL = 120 секунд (2× event_expire_seconds по умолчанию)
+        ttl_seconds = max(120, int(self.redis_settings.get("event_ttl_seconds", 120)))
         pipeline.expire(redis_key, ttl_seconds)
 
         results = await pipeline.execute()
@@ -333,9 +339,32 @@ class RedisOrderBookStore:
         created = results[1] if len(results) > 1 else 1
         return created == 0  # existed=True если created_at уже был
 
-    async def mark_arbitrage_event_sent(self, event_key):
-        """Отмечает событие как отправленное в Telegram."""
-        await self.redis.hset(self.arbitrage_event_key(event_key), mapping={"sent": "1"})
+    async def mark_arbitrage_event_sent(self, event_key, telegram_message_id):
+        """Отмечает событие как отправленное в Telegram с message_id."""
+        redis_key = self.arbitrage_event_key(event_key)
+        await self.redis.hset(
+            redis_key,
+            mapping={
+                "sent": "1",
+                "telegram_message_id": str(telegram_message_id),
+            },
+        )
+
+    async def accumulate_active_time(self, event_key, cumulative_seconds, last_active_at_iso):
+        """Обновляет cumulative_active_seconds и last_active_at для события."""
+        redis_key = self.arbitrage_event_key(event_key)
+        await self.redis.hset(
+            redis_key,
+            mapping={
+                "cumulative_active_seconds": str(cumulative_seconds),
+                "last_active_at": last_active_at_iso,
+            },
+        )
+
+    async def mark_trade_signal_published(self, event_key):
+        """Отмечает торговый сигнал как опубликованный."""
+        redis_key = self.arbitrage_event_key(event_key)
+        await self.redis.hset(redis_key, mapping={"trade_signal_published": "1"})
 
     async def delete_arbitrage_event(self, event_key):
         """Удаляет событие из Redis (Hash + индексный Set)."""

@@ -2,11 +2,13 @@ import asyncio
 import json
 import time
 import logging
+import urllib.parse
+import urllib.request
+import urllib.error
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from itertools import combinations
-from urllib import error, parse, request
 
 import redis.asyncio as redis
 from redis.exceptions import RedisError
@@ -36,112 +38,149 @@ class ArbitrageOpportunity:
     liquidity_exhausted: bool = False
 
 
-class TelegramNotifier:
-    def __init__(self, bot_token, chat_id, dedup_ttl_seconds=60.0):
+class TelegramNotificationService:
+    """Сервис отправки и редактирования Telegram-сообщений об арбитражных событиях."""
+
+    def __init__(self, bot_token, chat_id):
         self.bot_token = bot_token or ""
         self.chat_id = chat_id or ""
-        # dedup_ttl_seconds — окно дедупликации, чтобы не спамить одинаковыми сигналами.
-        self.dedup_ttl_seconds = dedup_ttl_seconds
-        # last_sent_at хранит момент отправки сигнала по ключу возможности.
-        self.last_sent_at = {}
         self.logger = logging.getLogger("telegram")
-        # Минимальный интервал между отправками в Telegram (сек) — защита от 429.
         self._min_send_interval = 1.0
         self._last_send_time = 0.0
 
     @property
     def enabled(self):
+        """Возвращает True если настроены bot_token и chat_id."""
         return bool(self.bot_token and self.chat_id)
 
-    def should_send(self, opportunity):
-        key = self._opportunity_key(opportunity)
-        now = time.monotonic()
-        last_ts = self.last_sent_at.get(key)
-        if last_ts is not None and (now - last_ts) < self.dedup_ttl_seconds:
-            return False
-        return True
-
-    def mark_sent(self, opportunity):
-        key = self._opportunity_key(opportunity)
-        self.last_sent_at[key] = time.monotonic()
-
-    def cleanup_cache(self):
-        now = time.monotonic()
-        expired_keys = [
-            key
-            for key, last_ts in self.last_sent_at.items()
-            if (now - last_ts) > self.dedup_ttl_seconds
-        ]
-        for key in expired_keys:
-            del self.last_sent_at[key]
-
-    def _opportunity_key(self, opportunity):
-        return f"{opportunity.coin}:{opportunity.buy_exchange}:{opportunity.sell_exchange}"
-
-    async def send(self, opportunity):
-        self.cleanup_cache()
-        if not self.enabled or not self.should_send(opportunity):
-            return
-
-        text = (
-            f"Coin: {opportunity.coin}\n"
-            f"Direction: BUY {opportunity.buy_exchange} -> SELL {opportunity.sell_exchange}\n"
-            f"Buy price: {opportunity.buy_price}\n"
-            f"Sell price: {opportunity.sell_price}\n"
-            f"Spread: {opportunity.spread_percent}%"
-        )
-        await self.send_text(text)
-        self.mark_sent(opportunity)
-        self.logger.info(
-            "Message sent successfully for %s BUY %s SELL %s spread=%s%%",
-            opportunity.coin,
-            opportunity.buy_exchange,
-            opportunity.sell_exchange,
-            opportunity.spread_percent,
-        )
-
-    async def send_text(self, text, parse_mode=None, disable_web_page_preview=False):
+    async def send_new_event(self, event_data):
+        """Отправляет новое сообщение о событии. Возвращает message_id или None."""
         if not self.enabled:
-            return
+            return None
+        text = self._build_start_message(event_data)
+        return await self._send_message(text, parse_mode="Markdown")
 
-        # Rate limiting: не чаще одного сообщения в _min_send_interval секунд.
+    async def edit_closed_event(self, message_id, event_data, end_time_iso):
+        """Редактирует отправленное сообщение обогащенными данными о завершении."""
+        if not self.enabled or not message_id:
+            return
+        text = self._build_end_message(event_data, end_time_iso)
+        await self._edit_message(message_id, text, parse_mode="Markdown")
+
+    def _build_start_message(self, event_data):
+        """Формирует Markdown-сообщение о старте арбитражного события."""
+        coin_pair = self._format_coin_pair(event_data["coin"])
+        buy_ex = event_data["buy_exchange"]
+        sell_ex = event_data["sell_exchange"]
+        spread = event_data.get("spread_percent", "0")
+        net_spread = event_data.get("net_spread", "0")
+        confidence = event_data.get("confidence", "0")
+        buy_price = self._format_price(event_data.get("buy_price", "0"))
+        sell_price = self._format_price(event_data.get("sell_price", "0"))
+        fee_total = event_data.get("fee_total", "0")
+        slippage_buy = event_data.get("slippage_buy", "0")
+        slippage_sell = event_data.get("slippage_sell", "0")
+        liq = event_data.get("liquidity_exhausted", "0") == "1"
+
+        return (
+            "🚀 *Арбитражный сигнал*\n"
+            f"Coin: *{coin_pair}*\n"
+            f"Direction: BUY `{buy_ex}` → SELL `{sell_ex}`\n"
+            f"Buy price: `{buy_price}`\n"
+            f"Sell price: `{sell_price}`\n"
+            f"Gross spread: *{spread}%*\n"
+            f"Net spread: `{net_spread}%`\n"
+            f"Fee total: `{fee_total}%`\n"
+            f"Slippage buy: `{slippage_buy}%`\n"
+            f"Slippage sell: `{slippage_sell}%`\n"
+            f"Confidence: `{confidence}%`\n"
+            f"Liquidity exhausted: {'⚠️ ДА' if liq else '✅ Нет'}"
+        )
+
+    def _build_end_message(self, event_data, end_time_iso):
+        """Формирует Markdown-сообщение о завершении события с обогащенной статистикой."""
+        coin_pair = self._format_coin_pair(event_data["coin"])
+        buy_ex = event_data["buy_exchange"]
+        sell_ex = event_data["sell_exchange"]
+        duration = self._calc_duration(event_data.get("start_time", ""), end_time_iso)
+        max_spread = event_data.get("max_spread", "0")
+        max_net = event_data.get("max_net_spread", "0")
+        final_spread = event_data.get("spread_percent", "0")
+        tick_count = event_data.get("tick_count", "N/A")
+        max_conf = event_data.get("max_confidence", "0")
+        min_conf = event_data.get("min_confidence", "0")
+
+        try:
+            marginality = float(max_spread) - float(final_spread)
+            marginality_str = f"{marginality:.4f}"
+        except (ValueError, TypeError):
+            marginality_str = "N/A"
+
+        return (
+            "✅ *Арбитраж завершен*\n"
+            f"Coin: *{coin_pair}*\n"
+            f"Direction: BUY `{buy_ex}` → SELL `{sell_ex}`\n"
+            f"\n📊 *Статистика:*\n"
+            f"Duration: `{duration} sec`\n"
+            f"Ticks survived: `{tick_count}`\n"
+            f"Max gross spread: *{max_spread}%*\n"
+            f"Max net spread: `{max_net}%`\n"
+            f"Final spread: `{final_spread}%`\n"
+            f"Marginality: `{marginality_str}%`\n"
+            f"Confidence max: `{max_conf}%`\n"
+            f"Confidence min: `{min_conf}%`"
+        )
+
+    async def _send_message(self, text, parse_mode=None):
+        """Отправляет сообщение через Telegram API. Возвращает message_id."""
         now = time.monotonic()
         elapsed = now - self._last_send_time
         if elapsed < self._min_send_interval:
             await asyncio.sleep(self._min_send_interval - elapsed)
-        self._last_send_time = time.monotonic()
 
         payload_dict = {"chat_id": self.chat_id, "text": text}
         if parse_mode:
             payload_dict["parse_mode"] = parse_mode
-        if disable_web_page_preview:
-            payload_dict["disable_web_page_preview"] = "true"
-        payload = parse.urlencode(payload_dict).encode()
+        payload_dict["disable_web_page_preview"] = "true"
+        payload = urllib.parse.urlencode(payload_dict).encode()
         api_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
 
         try:
+            response_body = await asyncio.to_thread(self._post, api_url, payload)
+            self._last_send_time = time.monotonic()
+            response_data = json.loads(response_body)
+            return response_data.get("result", {}).get("message_id")
+        except Exception as e:
+            self.logger.error("Failed to send Telegram message: %s", e)
+            return None
+
+    async def _edit_message(self, message_id, text, parse_mode=None):
+        """Редактирует существующее сообщение в Telegram."""
+        payload_dict = {
+            "chat_id": self.chat_id,
+            "message_id": message_id,
+            "text": text,
+        }
+        if parse_mode:
+            payload_dict["parse_mode"] = parse_mode
+        payload_dict["disable_web_page_preview"] = "true"
+        payload = urllib.parse.urlencode(payload_dict).encode()
+        api_url = f"https://api.telegram.org/bot{self.bot_token}/editMessageText"
+
+        try:
             await asyncio.to_thread(self._post, api_url, payload)
-        except RuntimeError as exc:
-            if "Telegram rate limit 429" in str(exc):
-                retry_after = 1
-                try:
-                    retry_after = int(str(exc).split("retry_after=")[1])
-                except Exception:
-                    pass
-                self.logger.warning(
-                    "Telegram rate limit hit, sleeping %s seconds", retry_after
-                )
-                await asyncio.sleep(retry_after)
-                return
-            raise
+            self.logger.info("Edited Telegram message %s", message_id)
+        except Exception as e:
+            self.logger.error("Failed to edit Telegram message %s: %s", message_id, e)
 
     def _post(self, url, payload):
-        req = request.Request(url=url, data=payload, method="POST")
+        """Синхронный POST-запрос к Telegram API."""
+        req = urllib.request.Request(url=url, data=payload, method="POST")
         try:
-            with request.urlopen(req, timeout=10) as response:
+            with urllib.request.urlopen(req, timeout=10) as response:
                 status_code = getattr(response, "status", None)
                 body_text = response.read().decode("utf-8", errors="replace")
-        except error.HTTPError as http_error:
+        except urllib.error.HTTPError as http_error:
             body_text = http_error.read().decode("utf-8", errors="replace")
             if http_error.code == 429:
                 retry_after = 1
@@ -150,33 +189,55 @@ class TelegramNotifier:
                     retry_after = body_json.get("parameters", {}).get("retry_after", 1)
                 except Exception:
                     pass
-                self.logger.error(
-                    "Telegram API HTTP error 429: retry after %s: %s", retry_after, body_text
-                )
-                raise RuntimeError(
-                    f"Telegram rate limit 429: retry_after={retry_after}"
-                ) from http_error
-            self.logger.error("Telegram API HTTP error %s: %s", http_error.code, body_text)
-            raise RuntimeError(
-                f"Telegram HTTP error {http_error.code}: {body_text}"
-            ) from http_error
-        except error.URLError as url_error:
-            self.logger.error("Telegram network error: %s", url_error)
+                self.logger.error("Telegram rate limit 429, retry after %s", retry_after)
+                raise RuntimeError(f"Telegram rate limit 429: retry_after={retry_after}") from http_error
+            raise RuntimeError(f"Telegram HTTP error {http_error.code}: {body_text}") from http_error
+        except urllib.error.URLError as url_error:
             raise RuntimeError(f"Telegram network error: {url_error}") from url_error
 
         if status_code != 200:
-            self.logger.error("Telegram non-200 response %s: %s", status_code, body_text)
-            raise RuntimeError(f"Telegram вернул код {status_code}: {body_text}")
+            raise RuntimeError(f"Telegram returned {status_code}: {body_text}")
+        return body_text
 
+    @staticmethod
+    def _format_coin_pair(symbol):
+        """Преобразует BTCUSDT → BTC/USDT."""
+        normalized = symbol.upper()
+        for quote in ["USDT", "USDC", "FDUSD", "TUSD", "BUSD", "BTC", "ETH", "BNB"]:
+            if normalized.endswith(quote) and len(normalized) > len(quote):
+                return f"{normalized[:-len(quote)]}/{quote}"
+        return normalized
+
+    @staticmethod
+    def _format_price(value):
+        """Форматирует цену."""
         try:
-            response_payload = json.loads(body_text)
-        except json.JSONDecodeError as decode_error:
-            self.logger.error("Telegram returned non-JSON response: %s", body_text)
-            raise RuntimeError(f"Telegram вернул не-JSON ответ: {body_text}") from decode_error
+            d = Decimal(str(value))
+            return f"{d:.6f}".rstrip("0").rstrip(".") or "0"
+        except Exception:
+            return str(value)
 
-        if not isinstance(response_payload, dict) or response_payload.get("ok") is not True:
-            self.logger.error("Telegram API error payload: %s", response_payload)
-            raise RuntimeError(f"Telegram API ошибка: {response_payload}")
+    @staticmethod
+    def _calc_duration(start_iso, end_iso):
+        """Считает длительность в секундах."""
+        try:
+            start = datetime.fromisoformat(start_iso)
+            end = datetime.fromisoformat(end_iso)
+            return max(0, int((end - start).total_seconds()))
+        except Exception:
+            return 0
+
+    def send_startup_message(self, text):
+        """Отправляет сервисное сообщение (синхронная обертка для startup)."""
+        if not self.enabled:
+            return
+        payload_dict = {"chat_id": self.chat_id, "text": text}
+        payload = urllib.parse.urlencode(payload_dict).encode()
+        api_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        try:
+            self._post(api_url, payload)
+        except Exception as e:
+            self.logger.error("Startup message failed: %s", e)
 
 
 class BackendService:
@@ -185,10 +246,9 @@ class BackendService:
         self.settings = settings
         self.history_store = history_store
         self.runtime_settings_store = runtime_settings_store
-        self.telegram = TelegramNotifier(
+        self.telegram = TelegramNotificationService(
             bot_token=self.settings["telegram"]["bot_token"],
             chat_id=self.settings["telegram"]["chat_id"],
-            dedup_ttl_seconds=self.settings["backend"].get("telegram_dedup_ttl_seconds", 60.0),
         )
         self.spread_calculator = NetSpreadCalculator(
             fee_config=self.settings.get("fees", {}),
@@ -273,8 +333,10 @@ class BackendService:
                 opportunities = self.find_arbitrage(aggregated_snapshot, raw_snapshot)
                 await self.sync_arbitrage_events(opportunities)
 
+                # Передаем ключи текущих возможностей для cumulative time tracking
+                current_opportunity_keys = {self.opportunity_key(item) for item in opportunities}
                 try:
-                    await self.process_arbitrage_events()
+                    await self.process_arbitrage_events(current_opportunity_keys)
                 except Exception as e:
                     self.arbitrage_logger.error("Arbitrage events processing failed: %s", e)
 
@@ -289,7 +351,7 @@ class BackendService:
                 self.backend_logger.debug("Backend loop iteration completed.")
             except Exception as e:
                 self.backend_logger.error("Backend loop failed: %s", e)
-                # При ошибке — payload уже обновлён в фазе 1
+                # При ошибке — payload уже обновлен в фазе 1
 
             render_interval = float(
                 self._runtime_value(
@@ -373,6 +435,15 @@ class BackendService:
                 "start_time": current_state["created_at"] if current_state else now_iso,
                 "max_spread": str(max_spread),
                 "max_net_spread": str(max_net_spread),
+                "tick_count": str(int(current_state["data"].get("tick_count", "0")) + 1) if current_state else "1",
+                "max_confidence": str(max(
+                    Decimal(str(item.confidence)),
+                    Decimal(current_state["data"].get("max_confidence", "0")) if current_state else Decimal("0")
+                )),
+                "min_confidence": str(min(
+                    Decimal(str(item.confidence)),
+                    Decimal(current_state["data"].get("min_confidence", "100")) if current_state else Decimal("100")
+                )),
             }
             existed = await self.store.upsert_arbitrage_event(
                 event_key=event_key,
@@ -431,14 +502,10 @@ class BackendService:
             data_age_ms=int(state.get("data_age_ms", "0") or 0),
         )
 
-    async def process_arbitrage_events(self):
-        """Обрабатывает события: delayed send и expire + архивирование."""
+    async def process_arbitrage_events(self, current_opportunity_keys):
+        """Обрабатывает события: cumulative time tracking, delayed send, expire."""
         events = await self.store.list_arbitrage_events()
         now = datetime.now(timezone.utc)
-        send_delay = float(self._runtime_value(
-            "event_send_delay_seconds",
-            self.settings["backend"]["event_send_delay_seconds"]
-        ))
         expire_seconds = float(self._runtime_value(
             "event_expire_seconds",
             self.settings["backend"]["event_expire_seconds"]
@@ -451,150 +518,117 @@ class BackendService:
         for event_key, state in events:
             try:
                 data = state["data"]
-                created_at = datetime.fromisoformat(state["created_at"])
-                updated_at = datetime.fromisoformat(state["updated_at"])
+                cumulative = float(state.get("cumulative_active_seconds", "0"))
+                last_active_str = state.get("last_active_at", state["created_at"])
+                last_active = datetime.fromisoformat(last_active_str)
+                is_active_now = event_key in current_opportunity_keys
+                time_since_active = (now - last_active).total_seconds()
 
-                if (now - created_at).total_seconds() > send_delay and not state["sent"]:
-                    event_confidence = Decimal(str(data.get("confidence", "0")))
-                    if event_confidence >= confidence_min:
-                        await self.send_new_event_message(data)
-                        await self.store.mark_arbitrage_event_sent(event_key)
-                        self.arbitrage_logger.info(
-                            "Arbitrage event sent to Telegram %s BUY %s SELL %s conf=%s%%",
-                            data["coin"],
-                            data["buy_exchange"],
-                            data["sell_exchange"],
-                            event_confidence,
+                if is_active_now:
+                    # --- Событие активно в этом тике ---
+                    delta = (now - last_active).total_seconds()
+                    if delta > 0:
+                        cumulative += delta
+                        await self.store.accumulate_active_time(
+                            event_key, cumulative, now.isoformat()
                         )
-                    else:
-                        self.arbitrage_logger.info(
-                            "Arbitrage event skipped Telegram (low confidence) %s BUY %s SELL %s conf=%s%%",
-                            data["coin"],
-                            data["buy_exchange"],
-                            data["sell_exchange"],
-                            event_confidence,
-                        )
-                        # НЕ помечаем sent=True — попробуем отправить позже если confidence вырастет
 
-                if (now - updated_at).total_seconds() > expire_seconds:
-                    end_time_iso = now.isoformat()
-                    try:
-                        await self.send_closed_event_message(data, end_time_iso)
-                    except Exception as e:
-                        self.arbitrage_logger.error(
-                            "Failed to send closed event message for %s: %s", event_key, e
-                        )
-                    try:
-                        await self.archive_event(data, end_time_iso)
-                    except Exception as e:
-                        self.arbitrage_logger.error(
-                            "Failed to archive event %s: %s", event_key, e
-                        )
-                    try:
-                        await self.store.delete_arbitrage_event(event_key)
-                        self.arbitrage_logger.info(
-                            "Arbitrage event closed %s BUY %s SELL %s",
-                            data["coin"],
-                            data["buy_exchange"],
-                            data["sell_exchange"],
-                        )
-                    except Exception as e:
-                        self.arbitrage_logger.error(
-                            "Failed to delete arbitrage event %s from Redis: %s", event_key, e
-                        )
+                    # Накопили 15 секунд и еще не отправляли?
+                    if cumulative >= 15.0 and not state["sent"]:
+                        event_confidence = Decimal(str(data.get("confidence", "0")))
+                        if event_confidence >= confidence_min:
+                            msg_id = await self.telegram.send_new_event(data)
+                            if msg_id:
+                                await self.store.mark_arbitrage_event_sent(event_key, msg_id)
+                                self.arbitrage_logger.info(
+                                    "Event sent to Telegram %s BUY %s SELL %s conf=%s%% msg_id=%s",
+                                    data["coin"], data["buy_exchange"],
+                                    data["sell_exchange"], event_confidence, msg_id,
+                                )
+                                # Публикуем торговый сигнал
+                                await self._publish_trade_signal(data, "OPEN")
+                        else:
+                            self.arbitrage_logger.info(
+                                "Event below confidence threshold %s BUY %s SELL %s conf=%s%% (need %s%%)",
+                                data["coin"], data["buy_exchange"],
+                                data["sell_exchange"], event_confidence, confidence_min,
+                            )
+
+                else:
+                    # --- Событие НЕ активно ---
+                    if time_since_active >= 3.0:
+                        if not state["sent"]:
+                            # Не отправляли и пропало >=3сек -> удаляем
+                            await self.store.delete_arbitrage_event(event_key)
+                            self.arbitrage_logger.info(
+                                "Event deleted (gap >= 3s, not sent) %s", event_key
+                            )
+                        elif time_since_active >= expire_seconds:
+                            # Уже отправили и пропало >=expire -> закрываем
+                            end_time_iso = now.isoformat()
+                            msg_id = state.get("telegram_message_id")
+                            if msg_id:
+                                try:
+                                    await self.telegram.edit_closed_event(
+                                        int(msg_id), data, end_time_iso
+                                    )
+                                except Exception as e:
+                                    self.arbitrage_logger.error(
+                                        "Failed to edit Telegram message %s: %s", msg_id, e
+                                    )
+                            # Публикуем сигнал закрытия (не блокируем cleanup)
+                            try:
+                                await self._publish_trade_signal(data, "CLOSE")
+                            except Exception as e:
+                                self.arbitrage_logger.error(
+                                    "Failed to publish close signal for %s: %s", event_key, e
+                                )
+                            # Архивируем (не блокируем cleanup при ошибке SQLite)
+                            try:
+                                await self.archive_event(data, end_time_iso)
+                            except Exception as e:
+                                self.arbitrage_logger.error(
+                                    "Failed to archive event %s: %s", event_key, e
+                                )
+                            # Удаляем из Redis в любом случае
+                            await self.store.delete_arbitrage_event(event_key)
+                            self.arbitrage_logger.info(
+                                "Event closed %s BUY %s SELL %s duration=%ss",
+                                data["coin"], data["buy_exchange"],
+                                data["sell_exchange"],
+                                int(cumulative),
+                            )
+
             except Exception as error:
                 self.arbitrage_logger.error(
-                    "Arbitrage event processing failed for key %s: %s",
-                    event_key,
-                    error,
+                    "Event processing failed for %s: %s", event_key, error
                 )
 
-    async def send_new_event_message(self, event_data):
-        """Отправляет в Telegram сообщение о новом событии."""
-        text = self.build_start_event_message(event_data)
-        await self.telegram.send_text(
-            text,
-            parse_mode="Markdown",
-            disable_web_page_preview=True,
-        )
-
-    async def send_closed_event_message(self, event_data, end_time_iso):
-        """Отправляет в Telegram сообщение о завершении события."""
-        text = self.build_end_event_message(event_data, end_time_iso)
-        await self.telegram.send_text(
-            text,
-            parse_mode="Markdown",
-            disable_web_page_preview=True,
-        )
-
-    def build_start_event_message(self, event_data):
-        """Формирует Telegram-сообщение о старте арбитражного события."""
-        coin_pair = self.format_coin_pair(event_data["coin"])
-        buy_link = self.format_exchange_link(event_data["buy_exchange"], event_data["coin"])
-        sell_link = self.format_exchange_link(event_data["sell_exchange"], event_data["coin"])
-        spread_value = self.format_percent(event_data["spread_percent"])
-        net_spread = self.format_percent(event_data.get("net_spread", "0"))
-        confidence = self.format_percent(event_data.get("confidence", "0"))
-        buy_price = self.format_price(event_data["buy_price"])
-        sell_price = self.format_price(event_data["sell_price"])
-        return (
-            "🚀 *Арбитражный сигнал*\n"
-            f"Coin: *{coin_pair}*\n"
-            f"Direction: BUY {buy_link} → SELL {sell_link}\n"
-            f"Buy price: `{buy_price}`\n"
-            f"Sell price: `{sell_price}`\n"
-            f"Gross spread: *{spread_value}%*\n"
-            f"Net spread: `{net_spread}%`\n"
-            f"Confidence: `{confidence}%`"
-        )
-
-    def build_end_event_message(self, event_data, end_time_iso):
-        """Формирует Telegram-сообщение о завершении арбитражного события."""
-        coin_pair = self.format_coin_pair(event_data["coin"])
-        buy_link = self.format_exchange_link(event_data["buy_exchange"], event_data["coin"])
-        sell_link = self.format_exchange_link(event_data["sell_exchange"], event_data["coin"])
-        started_at = self.format_timestamp(event_data["start_time"])
-        ended_at = self.format_timestamp(end_time_iso)
-        duration_seconds = self.calculate_duration_seconds(event_data["start_time"], end_time_iso)
-        max_spread = self.format_percent(event_data["max_spread"])
-        max_net_spread = self.format_percent(event_data.get("max_net_spread", "0"))
-        return (
-            "✅ *Арбитраж завершен*\n"
-            f"Coin: *{coin_pair}*\n"
-            f"Direction: BUY {buy_link} → SELL {sell_link}\n"
-            f"Started at: `{started_at}`\n"
-            f"Ended at: `{ended_at}`\n"
-            f"Duration: `{duration_seconds} sec`\n"
-            f"Max gross spread: *{max_spread}%*\n"
-            f"Max net spread: `{max_net_spread}%`"
-        )
-
-    def format_exchange_link(self, exchange_name, symbol):
-        """Возвращает Markdown-ссылку на торговую страницу биржи."""
-        url = self.generate_exchange_url(exchange_name, symbol)
-        if not url:
-            return exchange_name
-        return f"[{exchange_name}]({url})"
-
-    def generate_exchange_url(self, exchange_name, symbol):
-        """Генерирует URL торговой страницы биржи для конкретного инструмента."""
-        base, quote = self.split_symbol(symbol)
-        exchange = exchange_name.lower()
-        if exchange == "binance":
-            return f"https://www.binance.com/en/trade/{base}_{quote}"
-        if exchange == "kucoin":
-            return f"https://www.kucoin.com/trade/{base}-{quote}"
-        if exchange == "gateio":
-            return f"https://www.gate.io/trade/{base}_{quote}"
-        if exchange == "bybit":
-            return f"https://www.bybit.com/en/trade/spot/{base}/{quote}"
-        if exchange == "bitget":
-            return f"https://www.bitget.com/spot/{base}{quote}"
-        if exchange == "coinex":
-            return f"https://www.coinex.com/exchange/{base.lower()}-{quote.lower()}"
-        if exchange == "bingx":
-            return f"https://bingx.com/en/spot/{base}{quote}"
-        return ""
+    async def _publish_trade_signal(self, event_data, signal_type):
+        """Публикует торговый сигнал в Redis Pub/Sub для торгового бота."""
+        try:
+            signal = {
+                "type": "trade_signal",
+                "signal_type": signal_type,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event_key": f"{event_data['coin']}:{event_data['buy_exchange']}:{event_data['sell_exchange']}",
+                "coin": event_data["coin"],
+                "buy_exchange": event_data["buy_exchange"],
+                "sell_exchange": event_data["sell_exchange"],
+                "buy_price": event_data.get("buy_price", "0"),
+                "sell_price": event_data.get("sell_price", "0"),
+                "spread_percent": event_data.get("spread_percent", "0"),
+                "net_spread": event_data.get("net_spread", "0"),
+                "confidence": event_data.get("confidence", "0"),
+                "fee_total": event_data.get("fee_total", "0"),
+                "target_value_usdt": str(self.settings["backend"]["target_value"]),
+            }
+            await self.store.redis.publish("trade:signals", json.dumps(signal, ensure_ascii=False))
+            self.arbitrage_logger.info(
+                "Trade signal published: %s %s", signal_type, signal["event_key"]
+            )
+        except Exception as e:
+            self.arbitrage_logger.error("Failed to publish trade signal: %s", e)
 
     def split_symbol(self, symbol):
         """Разбивает символ вида BASEQUOTE на BASE и QUOTE."""
@@ -616,44 +650,6 @@ class BackendService:
             if normalized.endswith(quote) and len(normalized) > len(quote):
                 return normalized[: -len(quote)], quote
         return normalized[:-4], normalized[-4:]
-
-    def format_coin_pair(self, symbol):
-        """Преобразует LINKUSDT в формат LINK/USDT."""
-        base, quote = self.split_symbol(symbol)
-        return f"{base}/{quote}"
-
-    def format_price(self, value):
-        """Форматирует цену до 2-6 знаков без лишних нулей."""
-        decimal_value = Decimal(str(value))
-        formatted = f"{decimal_value:.6f}".rstrip("0").rstrip(".")
-        return formatted or "0"
-
-    def format_percent(self, value):
-        """Форматирует процент в диапазоне 2-4 знака после запятой."""
-        decimal_value = Decimal(str(value))
-        rounded = decimal_value.quantize(Decimal("0.0001"))
-        text = format(rounded, "f").rstrip("0").rstrip(".")
-        if "." not in text:
-            return f"{text}.00"
-        fraction = text.split(".")[1]
-        if len(fraction) == 1:
-            return f"{text}0"
-        return text
-
-    def calculate_duration_seconds(self, start_time_iso, end_time_iso):
-        """Считает длительность события в секундах."""
-        start_dt = datetime.fromisoformat(start_time_iso)
-        end_dt = datetime.fromisoformat(end_time_iso)
-        return max(0, int((end_dt - start_dt).total_seconds()))
-
-    def format_timestamp(self, ts):
-        """Конвертирует UTC timestamp в Владивосток (UTC+10) и форматирует строку."""
-        dt = datetime.fromisoformat(ts)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        vladivostok_tz = timezone(timedelta(hours=10))
-        local_dt = dt.astimezone(vladivostok_tz)
-        return local_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     def opportunity_key(self, opportunity):
         """Возвращает короткий ключ возможности: coin+buy_exchange+sell_exchange."""
@@ -684,13 +680,13 @@ class BackendService:
         return value
 
     async def notify_backend_started(self):
-        """Шлёт сервисное уведомление о запуске backend."""
+        """Шлет сервисное уведомление о запуске backend."""
         startup_message = "[BACKEND] Бэкенд поднят и готов к обработке арбитража."
         try:
-            await self.telegram.send_text(startup_message)
+            self.telegram.send_startup_message(startup_message)
             self.backend_logger.info("Backend startup notification sent to Telegram.")
         except Exception as e:
-            self.telegram.logger.error("API error while sending startup notification: %s", e)
+            self.telegram.logger.error("Startup notification error: %s", e)
 
     def normalize_symbol(self, symbol):
         """Нормализует символ: uppercase + только буквы/цифры."""
@@ -718,7 +714,7 @@ class BackendService:
 
     def calculate_confidence(self, data_age_ms, liquidity_exhausted, target_value, actual_quote_value):
         """
-        Расчёт confidence score (0–100).
+        Расчет confidence score (0–100).
         Факторы:
         - Возраст данных (40%)
         - Недостаток ликвидности (30%)
@@ -761,7 +757,7 @@ class BackendService:
         return by_symbol
 
     def valid_side(self, side):
-        """Проверяет валидность агрегированной стороны стакана для расчётов."""
+        """Проверяет валидность агрегированной стороны стакана для расчетов."""
         if side is None:
             return False
         if side.volume is None or side.price is None:
@@ -819,7 +815,7 @@ class BackendService:
         buy_exchange = buy_entry["exchange"]
         sell_exchange = sell_entry["exchange"]
 
-        # Получаем сырые уровни стакана для расчёта net spread
+        # Получаем сырые уровни стакана для расчета net spread
         raw_buy = raw_snapshot.get(buy_exchange, {}).get(symbol, {})
         raw_sell = raw_snapshot.get(sell_exchange, {}).get(symbol, {})
         buy_asks = raw_buy.get("ASK", [])

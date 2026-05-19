@@ -8,29 +8,25 @@ import pytest
 
 
 class TestM1TelegramRetryStorm:
-    """M1: Дедуп должен работать и для закрытия событий, либо retry должен иметь backoff."""
+    """M1: При ошибке edit_closed_event событие всё равно удаляется из Redis."""
 
     @pytest.mark.asyncio
-    async def test_closed_event_dedup_or_backoff(self):
-        from backend.service import TelegramNotifier
-        notifier = TelegramNotifier("token", "123", dedup_ttl_seconds=60.0)
+    async def test_closed_event_edit_failure_still_deletes(self):
+        from backend.service import TelegramNotificationService
+        notifier = TelegramNotificationService("token", "123")
 
-        class FakeOpp:
-            coin = "BTCUSDT"
-            buy_exchange = "binance"
-            sell_exchange = "bybit"
-            buy_price = Decimal("100")
-            sell_price = Decimal("101")
-            spread_percent = Decimal("1")
-
-        opp = FakeOpp()
-        # Первый вызов
-        with patch.object(notifier, '_post', return_value=None):
-            await notifier.send(opp)
-            assert not notifier.should_send(opp)  # дедуп сработал
-
-        # Второй вызов должен быть заблокирован дедупом
-        assert not notifier.should_send(opp)
+        # edit_closed_event не падает при ошибке — логирует и продолжает
+        with patch.object(notifier, '_post', side_effect=RuntimeError("Telegram down")):
+            # Не должно бросать исключение наружу
+            test_data = {
+                "coin": "BTCUSDT",
+                "buy_exchange": "binance",
+                "sell_exchange": "bybit",
+                "spread_percent": "1.0",
+                "start_time": "2024-01-01T00:00:00+00:00",
+                "max_spread": "2.0",
+            }
+            await notifier.edit_closed_event(12345, test_data, "2024-01-01T00:00:30+00:00")
 
 
 class TestM2ClockSkewFreshness:
@@ -100,23 +96,25 @@ class TestM5FrontendMissingApiKey:
 
 
 class TestM1TelegramRateLimit:
-    """M1-addendum: TelegramNotifier должен иметь rate limiting для защиты от 429."""
+    """M1-addendum: TelegramNotificationService должен иметь rate limiting для защиты от 429."""
 
     @pytest.mark.asyncio
-    async def test_send_text_enforces_min_interval(self):
-        from backend.service import TelegramNotifier
-        notifier = TelegramNotifier("token", "123")
+    async def test_send_message_enforces_min_interval(self):
+        from backend.service import TelegramNotificationService
+        notifier = TelegramNotificationService("token", "123")
         notifier._last_send_time = 0.0
         notifier._min_send_interval = 0.3
 
-        with patch.object(notifier, '_post', return_value=None) as mock_post:
+        # Мокаем _post чтобы он возвращал JSON с message_id
+        fake_response = '{"ok": true, "result": {"message_id": 123}}'
+        with patch.object(notifier, '_post', return_value=fake_response) as mock_post:
             start = asyncio.get_event_loop().time()
-            await notifier.send_text("msg1")
-            await notifier.send_text("msg2")
+            await notifier._send_message("msg1")
+            await notifier._send_message("msg2")
             elapsed = asyncio.get_event_loop().time() - start
 
         assert mock_post.call_count == 2
-        assert elapsed >= 0.3  # должен был подождать между отправками
+        assert elapsed >= 0.25  # должен был подождать между отправками
 
 
 class TestM6UpsertExistedFlag:

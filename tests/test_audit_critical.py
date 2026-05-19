@@ -81,6 +81,10 @@ class TestC2C3EventLifecycleDoesNotLeakOnTelegramOrSqliteFailure:
                 "created_at": "2024-01-01T00:00:00+00:00",
                 "updated_at": "2024-01-01T00:00:00+00:00",
                 "sent": True,
+                "telegram_message_id": "12345",
+                "cumulative_active_seconds": "20",
+                "last_active_at": "2024-01-01T00:00:00+00:00",
+                "trade_signal_published": True,
                 "data": {
                     "coin": "BTCUSDT",
                     "buy_exchange": "binance",
@@ -94,7 +98,7 @@ class TestC2C3EventLifecycleDoesNotLeakOnTelegramOrSqliteFailure:
             })
         ])
         store.delete_arbitrage_event = AsyncMock()
-        store.mark_arbitrage_event_sent = AsyncMock()
+        store.redis = AsyncMock()
 
         settings = {
             "exchanges": ["binance", "bybit"],
@@ -113,10 +117,11 @@ class TestC2C3EventLifecycleDoesNotLeakOnTelegramOrSqliteFailure:
         from backend.history_store import ArbitrageHistoryStore
         history = ArbitrageHistoryStore(":memory:", max_records=100)
         svc = BackendService(store, settings, history)
-        # симулируем падение Telegram
-        svc.telegram.send_text = AsyncMock(side_effect=RuntimeError("Telegram down"))
+        # симулируем падение Telegram при редактировании закрытого события
+        svc.telegram.edit_closed_event = AsyncMock(side_effect=RuntimeError("Telegram down"))
 
-        await svc.process_arbitrage_events()
+        # Событие НЕ в текущих возможностях (пропало) и sent=True → должно закрыться
+        await svc.process_arbitrage_events(set())
         # Событие должно быть удалено из Redis несмотря на ошибку Telegram
         store.delete_arbitrage_event.assert_awaited_once_with("BTC:binance:bybit")
 
@@ -128,6 +133,10 @@ class TestC2C3EventLifecycleDoesNotLeakOnTelegramOrSqliteFailure:
                 "created_at": "2024-01-01T00:00:00+00:00",
                 "updated_at": "2024-01-01T00:00:00+00:00",
                 "sent": True,
+                "telegram_message_id": "12345",
+                "cumulative_active_seconds": "20",
+                "last_active_at": "2024-01-01T00:00:00+00:00",
+                "trade_signal_published": True,
                 "data": {
                     "coin": "BTCUSDT",
                     "buy_exchange": "binance",
@@ -141,6 +150,7 @@ class TestC2C3EventLifecycleDoesNotLeakOnTelegramOrSqliteFailure:
             })
         ])
         store.delete_arbitrage_event = AsyncMock()
+        store.redis = AsyncMock()
 
         settings = {
             "exchanges": ["binance", "bybit"],
@@ -160,7 +170,8 @@ class TestC2C3EventLifecycleDoesNotLeakOnTelegramOrSqliteFailure:
         history = ArbitrageHistoryStore(":memory:", max_records=100)
         svc = BackendService(store, settings, history)
 
-        await svc.process_arbitrage_events()
+        # Событие НЕ в текущих возможностях → должно закрыться (Telegram disabled)
+        await svc.process_arbitrage_events(set())
         store.delete_arbitrage_event.assert_awaited_once_with("BTC:binance:bybit")
 
 
