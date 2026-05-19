@@ -1,0 +1,11 @@
+2026-05-19 04:52:04 | INFO | exchanges.bybit | WS connecting connection_id=4 url=wss://stream.bybit.com/v5/public/spot symbols=['AEVOUSDT', 'FLOKIUSDT', 'BONKUSDT', 'WIFUSDT', 'MEMEUSDT']
+2026-05-19 04:52:05 | INFO | exchanges.bybit | WS connected connection_id=4
+2026-05-19 04:52:07 | INFO | exchanges.bybit | WS connecting connection_id=1 url=wss://stream.bybit.com/v5/public/spot symbols=['SOLUSDT', 'XRPUSDT', 'SUIUSDT', 'ADAUSDT', 'ZECUSDT', 'LINKUSDT', 'PEPEUSDT', 'LTCUSDT', 'NEARUSDT', 'UNIUSDT']
+2026-05-19 04:52:07 | INFO | exchanges.bybit | WS connecting connection_id=2 url=wss://stream.bybit.com/v5/public/spot symbols=['DOTUSDT', 'PENGUUSDT', 'WLDUSDT', 'SHIBUSDT', 'TONUSDT', 'ARBUSDT', 'HTXUSDT', 'BTCUSDT', 'ETHUSDT', 'OPUSDT']
+2026-05-19 04:52:07 | INFO | exchanges.bybit | WS connecting connection_id=3 url=wss://stream.bybit.com/v5/public/spot symbols=['MATICUSDT', 'IMXUSDT', 'APTUSDT', 'SEIUSDT', 'TIAUSDT', 'INJUSDT', 'RNDRUSDT', 'ENAUSDT', 'PYTHUSDT', 'BLURUSDT']
+2026-05-19 04:52:07 | INFO | exchanges.bybit | WS connected connection_id=1
+2026-05-19 04:52:08 | INFO | exchanges.bybit | WS connected connection_id=2
+2026-05-19 04:52:08 | INFO | exchanges.bybit | WS connected connection_id=3
+2026-05-19 05:00:31 | WARNING | exchanges.bybit | WS closed connection_id=2 reconnects=1: code=None reason=. Retry in 2.0s.
+2026-05-19 05:00:42 | INFO | exchanges.bybit | WS connecting connection_id=2 url=wss://stream.bybit.com/v5/public/spot symbols=['DOTUSDT', 'PENGUUSDT', 'WLDUSDT', 'SHIBUSDT', 'TONUSDT', 'ARBUSDT', 'HTXUSDT', 'BTCUSDT', 'ETHUSDT', 'OPUSDT']
+2026-05-19 05:00:43 | INFO | exchanges.bybit | WS connected connection_id=2

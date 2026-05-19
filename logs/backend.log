@@ -1,0 +1,5 @@
+2026-05-19 04:51:54 | INFO | backend | Streamer startup with exchanges=bybit,binance,kucoin,gateio,bitget,coinex,bingx
+2026-05-19 04:51:55 | INFO | backend | Backend service startup.
+2026-05-19 04:51:55 | INFO | backend | Backend background task started.
+2026-05-19 04:51:56 | INFO | backend | Backend startup notification sent to Telegram.
+2026-05-19 04:51:56 | INFO | backend | Backend main loop started.

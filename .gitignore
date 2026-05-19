@@ -64,8 +64,6 @@ ENV/
 *.sublime-workspace
 
 # Logs
-*.log
-logs/*
 # OS
 .DS_Store
 Thumbs.db
