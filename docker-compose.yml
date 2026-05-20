@@ -79,6 +79,57 @@ services:
       - backend
     restart: unless-stopped
 
+  trader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: crypto_trader
+    env_file:
+      - .env
+    command: ["python", "-m", "trader.main"]
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - TRADER_MODE=${TRADER_MODE:-demo}
+      - TRADER_BALANCE_PERCENT=${TRADER_BALANCE_PERCENT:-10}
+      - TRADER_MIN_AMOUNT_USDT=${TRADER_MIN_AMOUNT_USDT:-50}
+      - TRADER_CONFIDENCE_THRESHOLD=${TRADER_CONFIDENCE_THRESHOLD:-70}
+      - TRADER_MIN_NET_SPREAD=${TRADER_MIN_NET_SPREAD:-0.3}
+      - TRADER_REDIS_CHANNEL=${TRADER_REDIS_CHANNEL:-trade:signals}
+      - TRADER_REBALANCE_ENABLED=${TRADER_REBALANCE_ENABLED:-true}
+      - TRADER_REBALANCE_THRESHOLD_USDT=${TRADER_REBALANCE_THRESHOLD_USDT:-1000}
+      - TRADER_REBALANCE_MIN_TRANSFER=${TRADER_REBALANCE_MIN_TRANSFER:-100}
+      - TRADER_REBALANCE_INTERVAL=${TRADER_REBALANCE_INTERVAL:-300}
+      - TRADER_PAPER_BALANCE_USDT=${TRADER_PAPER_BALANCE_USDT:-10000}
+      - TRADER_DEMO_EXCHANGES=${TRADER_DEMO_EXCHANGES:-bybit,binance,kucoin,bitget}
+      - BYBIT_TESTNET_API_KEY=${BYBIT_TESTNET_API_KEY}
+      - BYBIT_TESTNET_API_SECRET=${BYBIT_TESTNET_API_SECRET}
+      - BINANCE_TESTNET_API_KEY=${BINANCE_TESTNET_API_KEY}
+      - BINANCE_TESTNET_API_SECRET=${BINANCE_TESTNET_API_SECRET}
+      - KUCOIN_PAPER_API_KEY=${KUCOIN_PAPER_API_KEY}
+      - KUCOIN_PAPER_API_SECRET=${KUCOIN_PAPER_API_SECRET}
+      - KUCOIN_PAPER_API_PASSPHRASE=${KUCOIN_PAPER_API_PASSPHRASE}
+      - BITGET_DEMO_API_KEY=${BITGET_DEMO_API_KEY}
+      - BITGET_DEMO_API_SECRET=${BITGET_DEMO_API_SECRET}
+      - BITGET_DEMO_API_PASSPHRASE=${BITGET_DEMO_API_PASSPHRASE}
+      - TRADER_HISTORY_DB_PATH=${TRADER_HISTORY_DB_PATH:-/data/trade_history.db}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_DIR=${LOG_DIR:-/app/logs}
+    volumes:
+      - trader_data:/data
+      - ${LOG_DIR:-./logs}:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
 volumes:
   redis_data:
   arbitrage_data:
+  trader_data:
+    driver: local
